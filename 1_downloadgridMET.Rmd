@@ -1,0 +1,4018 @@
+---
+title: "download gridMET"
+output: html_document
+date: "2024-10-22"
+---
+
+**Goals:** Download gridded climate data for each site & make climate summaries
+
+**Output:** full_climate_summaries_dailymonthlyquarterly_20241023.csv
+- all climate variables: pdsi, tmmn, tmmx, pet, pr
+
+**Notes:**
+- gridMET and TerraClim data accessed on 2024-10-23
+
+##Step 0. Get set up 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## upload neccessary packages
+library(stringr)
+library(downloader)
+library(tigris)
+library(terra)
+library(data.table)
+library(ggplot2)
+library(janitor)
+library(tidyverse)
+library(exactextractr)
+library(raster)
+library(RNetCDF)
+library(ncdf4)
+library(climateR)
+
+## upload data
+coords <- read.csv("data/tick_coords_allLS.csv") %>% dplyr::select(-X)
+
+## format data
+# turn into a spatial data frame
+coords_clean <- coords %>% 
+  dplyr::select(location, lat, lon) %>% 
+  unique() 
+coordinates(coords_clean) = ~ lon + lat
+
+# give locations a rowid to merge to gridded data
+coords_id <- coords %>% 
+  mutate(rowid = seq(1,60))
+```
+
+##Step 1. Create a spatial extent for just counties
+```{r}
+## pull potential counties these locations are in
+# probably a more standardize way to do this but I just looked up FIP codes
+study_counties <- tigris::counties(state = "CA") %>% 
+  dplyr::select(STATEFP, COUNTYFP) %>% 
+  dplyr::filter(COUNTYFP == "001" | 
+           COUNTYFP == "013" | 
+           COUNTYFP == "085"| 
+             COUNTYFP == "029" |
+             COUNTYFP == "033" |
+             COUNTYFP == "037" |
+             COUNTYFP == "041" |
+             COUNTYFP == "053" |
+             COUNTYFP == "055" |
+             COUNTYFP == "059" |
+             COUNTYFP == "075" |
+             COUNTYFP == "077" |
+             COUNTYFP == "079" |
+             COUNTYFP == "081" |
+             COUNTYFP == "083" |
+             COUNTYFP == "087" |
+             COUNTYFP == "095" |
+             COUNTYFP == "097" |
+             COUNTYFP == "111"|
+             COUNTYFP == "045"|# added after  
+             COUNTYFP == "011"|
+             COUNTYFP == "013"|
+             COUNTYFP == "067"|
+             COUNTYFP == "069") 
+```
+
+##Step 2. Write gridMET function
+```{r}
+get_grid_MET <- function(var_name, year) {
+
+# step 1. make url to pull directly from gridMET website
+  target_url <- 
+  paste0(
+    "http://www.northwestknowledge.net/metdata/data/",
+    var_name, "_", year,
+    ".nc"
+  )
+
+# step 2. create file neame system when data is downloaded
+  file_name <-
+  paste0(
+    "data/gridmet/", # change to whatever folder you want it in
+    var_name, "_", year,
+    ".nc"
+  )
+
+# step 3. actual download command
+  downloader::download(
+    url = target_url,
+    destfile = file_name,
+    mode = 'wb'
+  )
+
+# step 4. read the raster data 
+  temp_rast <- rast(file_name)
+
+# step 5. extract raster data for selected counties & format
+  temp_data <- 
+  #--- extract data for each county ---#
+  exact_extract(temp_rast, study_counties) %>% 
+  #--- list of data.frames into data.table ---#
+  rbindlist(idcol = "rowid") %>% 
+  #--- wide to long ---#
+  melt(id.var = c("rowid", "coverage_fraction")) %>% 
+  #--- remove observations with NA values ---#
+  .[!is.na(value), ] %>% 
+  #--- get only the numeric part ---#
+  .[, variable := str_sub(variable, -5, -1) %>% as.numeric()] %>% 
+  #--- recover dates ---#
+  .[, date := variable + ymd("1900-01-01")] %>% 
+  #--- find daily coverage-weight average by county ---#
+  .[, 
+    .(value = sum(value * coverage_fraction) / sum(coverage_fraction)), 
+    by = .(rowid, date)
+  ] %>% 
+  .[, var := var_name]
+
+  return(temp_data)
+
+}
+```
+
+
+##Step 3. Loop gridMET function over variables of interest
+
+Note: didn't download PDSI here since it's typically measured ~5 days
+```{r}
+## step 1. create list of parameters and dates of interest
+
+(
+par_data <- 
+  expand.grid(
+    var_name = c("tmmn", "tmmx","sph", "pr", "pet"
+                 ),
+    year = 2006:2022
+  ) %>% 
+  data.table() %>% 
+  .[, var_name := as.character(var_name)]
+)
+
+## step 2. loop over rows of parameter inputs
+#--- parallel processing ---#
+library(future.apply)
+library(future)
+future::plan(workers = 12)
+
+(
+all_data <- 
+  future_lapply(
+    seq_len(nrow(par_data)), 
+    function(x) get_grid_MET(par_data[x, var_name], par_data[x, year])
+  ) %>% 
+  rbindlist() %>% 
+  dcast(rowid + date ~ var, value.var = "value")
+)
+
+
+```
+
+
+##Step 4. Test to see if it works 
+
+Note: can omit these data files
+```{r}
+test_brick <- brick("data/gridmet/pet_2010.nc")
+
+test_crop <- crop(test_brick, study_counties)
+
+plot(test_crop[[1]])
+
+# step 2. extract raster values from points
+test_extract <- raster::extract(test_crop, coords_clean)
+
+# step 3. combine ot make Spatial Points DataFrame
+test_df <- cbind(coords_clean, test_extract)
+
+
+# step 4. change df to dt
+test_dt <- write.table(test_df, "data/gridmet/test_dt.csv",
+            append = FALSE, sep = ",", row.names = FALSE,
+            col.names = TRUE)
+
+# read dt in
+test_dt2 <- read.csv("data/gridmet/test_dt.csv")
+
+# convert from wide to long
+test_dt_long <- test_dt2 %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # would change this for other vars
+  dplyr::select(location, lon, lat, date, value, value_type) 
+
+
+# do further cleaning of dates because of gridMET quirks starting in 1990
+test_dt_long$date <- str_replace(test_dt_long$date, "X4", "4")
+
+test_dt_long$date <- format(as.Date(as.numeric(test_dt_long$date)),
+                            origin = "1901-01-01")
+
+# plot to check
+test_dt_long %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) ## not sure why Andre'a MW sites not working, will add those on manually later
+
+# great this works, if this was going to be our final df then i'd save as csv
+# ##write.csv(test_dt_long, "data/gridment/csv/test_dt_long.csv")
+
+```
+
+##Step 5. Set boundary extent
+
+```{r}
+# study_counties dataframe gave me these coordinates
+aoi <- extent(-124.1349, -117.413, 32.75004, 40.00247)
+```
+
+##Step 6. Download individual variables for study coordinates
+
+Note: this is not an efficient way to do this, but it works for now
+
+###tmmn
+
+2007
+```{r}
+brick <- brick("data/gridmet/tmmn_2007.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2007.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2007.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_07.csv")
+
+```
+
+2008
+```{r}
+brick <- brick("data/gridmet/tmmn_2008.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2008.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2008.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_08.csv")
+
+```
+
+2009
+```{r}
+brick <- brick("data/gridmet/tmmn_2009.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2009.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2009.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_09.csv")
+
+```
+
+2010
+```{r}
+brick <- brick("data/gridmet/tmmn_2010.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2010.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2010.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_10.csv")
+```
+
+2011
+```{r}
+brick <- brick("data/gridmet/tmmn_2011.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2011.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2011.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_11.csv")
+```
+
+2012
+```{r}
+
+brick <- brick("data/gridmet/tmmn_2012.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2012.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2012.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_12.csv")
+```
+
+2013
+```{r}
+
+brick <- brick("data/gridmet/tmmn_2013.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2013.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2013.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_13.csv")
+```
+
+2014
+```{r}
+brick <- brick("data/gridmet/tmmn_2014.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2014.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2014.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_14.csv")
+```
+
+
+2015
+
+```{r}
+brick <- brick("data/gridmet/tmmn_2015.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2015.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2015.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_15.csv")
+```
+
+2016
+
+```{r}
+brick <- brick("data/gridmet/tmmn_2016.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2016.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2016.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_16.csv")
+```
+
+2017
+
+```{r}
+brick <- brick("data/gridmet/tmmn_2017.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2017.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2017.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_17.csv")
+```
+
+2018
+```{r}
+
+brick <- brick("data/gridmet/tmmn_2018.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2018.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2018.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_18.csv")
+```
+
+2019
+
+```{r}
+brick <- brick("data/gridmet/tmmn_2019.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2019.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2019.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_19.csv")
+```
+
+2020
+
+```{r}
+brick <- brick("data/gridmet/tmmn_2020.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2020.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2020.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_20.csv")
+```
+
+2021
+
+```{r}
+brick <- brick("data/gridmet/tmmn_2021.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2021.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2021.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_21.csv")
+```
+
+2022
+
+```{r}
+brick <- brick("data/gridmet/tmmn_2022.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmn_2022.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmn_2022.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmn") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmn_22.csv")
+```
+
+
+###tmmx
+
+2008
+```{r}
+brick <- brick("data/gridmet/tmmx_2007.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2007.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2007.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_07.csv")
+
+```
+
+
+
+2008
+```{r}
+brick <- brick("data/gridmet/tmmx_2008.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2008.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2008.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_08.csv")
+
+```
+
+
+2009
+```{r}
+brick <- brick("data/gridmet/tmmx_2009.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2009.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2009.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_09.csv")
+
+```
+
+
+2010
+```{r}
+brick <- brick("data/gridmet/tmmx_2010.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2010.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2010.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_10.csv")
+```
+
+2011
+```{r}
+brick <- brick("data/gridmet/tmmx_2011.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2011.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2011.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_11.csv")
+```
+
+2012
+```{r}
+
+brick <- brick("data/gridmet/tmmx_2012.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2012.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2012.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_12.csv")
+```
+
+2013
+```{r}
+
+brick <- brick("data/gridmet/tmmx_2013.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2013.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2013.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_13.csv")
+```
+
+
+2014
+```{r}
+brick <- brick("data/gridmet/tmmx_2014.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2014.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2014.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_14.csv")
+```
+
+
+2015
+
+```{r}
+brick <- brick("data/gridmet/tmmx_2015.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2015.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2015.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_15.csv")
+```
+
+2016
+
+```{r}
+brick <- brick("data/gridmet/tmmx_2016.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2016.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2016.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_16.csv")
+```
+
+2017
+
+```{r}
+brick <- brick("data/gridmet/tmmx_2017.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2017.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2017.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_17.csv")
+```
+
+2018
+```{r}
+
+brick <- brick("data/gridmet/tmmx_2018.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2018.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2018.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_18.csv")
+```
+
+2019
+
+```{r}
+brick <- brick("data/gridmet/tmmx_2019.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2019.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2019.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_19.csv")
+```
+
+2020
+
+```{r}
+brick <- brick("data/gridmet/tmmx_2020.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2020.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2020.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_20.csv")
+```
+
+2021
+
+```{r}
+brick <- brick("data/gridmet/tmmx_2021.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2021.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2021.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_21.csv")
+```
+
+2022
+
+```{r}
+brick <- brick("data/gridmet/tmmx_2022.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_tmmx_2022.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_tmmx_2022.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "tmmx") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_tmmx_22.csv")
+```
+
+##sph
+2007
+```{r}
+brick <- brick("data/gridmet/sph_2007.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2007.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2007.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_07.csv")
+
+```
+
+
+2008
+```{r}
+brick <- brick("data/gridmet/sph_2008.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2008.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2008.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_08.csv")
+
+```
+
+
+2009
+```{r}
+brick <- brick("data/gridmet/sph_2009.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2009.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2009.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_09.csv")
+
+```
+
+
+2010
+```{r}
+brick <- brick("data/gridmet/sph_2010.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2010.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2010.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_10.csv")
+```
+
+2011
+```{r}
+brick <- brick("data/gridmet/sph_2011.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2011.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2011.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_11.csv")
+```
+
+2012
+```{r}
+
+brick <- brick("data/gridmet/sph_2012.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2012.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2012.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_12.csv")
+```
+
+2013
+```{r}
+
+brick <- brick("data/gridmet/sph_2013.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2013.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2013.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_13.csv")
+```
+
+
+2014
+```{r}
+brick <- brick("data/gridmet/sph_2014.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2014.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2014.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_14.csv")
+```
+
+2015
+
+```{r}
+brick <- brick("data/gridmet/sph_2015.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2015.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2015.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_15.csv")
+```
+
+2016
+
+```{r}
+brick <- brick("data/gridmet/sph_2016.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2016.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2016.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_16.csv")
+```
+
+2017
+
+```{r}
+brick <- brick("data/gridmet/sph_2017.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2017.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2017.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_17.csv")
+```
+
+2018
+```{r}
+
+brick <- brick("data/gridmet/sph_2018.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2018.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2018.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_18.csv")
+```
+
+2019
+
+```{r}
+brick <- brick("data/gridmet/sph_2019.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2019.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2019.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_19.csv")
+```
+
+2020
+
+```{r}
+brick <- brick("data/gridmet/sph_2020.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2020.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2020.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_20.csv")
+```
+
+2021
+
+```{r}
+brick <- brick("data/gridmet/sph_2021.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2021.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2021.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_21.csv")
+```
+
+2022
+
+```{r}
+brick <- brick("data/gridmet/sph_2022.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_sph_2022.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_sph_2022.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "sph") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_sph_22.csv")
+```
+
+
+###pr
+2007
+```{r}
+brick <- brick("data/gridmet/pr_2007.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2007.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2007.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_07.csv")
+
+```
+
+
+2008
+```{r}
+brick <- brick("data/gridmet/pr_2008.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2008.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2008.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_08.csv")
+
+```
+
+
+2009
+```{r}
+brick <- brick("data/gridmet/pr_2009.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2009.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2009.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_09.csv")
+
+```
+
+
+2010
+```{r}
+brick <- brick("data/gridmet/pr_2010.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2010.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2010.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_10.csv")
+```
+
+2011
+```{r}
+brick <- brick("data/gridmet/pr_2011.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2011.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2011.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_11.csv")
+```
+
+2012
+```{r}
+
+brick <- brick("data/gridmet/pr_2012.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2012.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2012.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_12.csv")
+```
+
+2013
+```{r}
+
+brick <- brick("data/gridmet/pr_2013.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2013.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2013.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_13.csv")
+```
+
+
+2014
+```{r}
+brick <- brick("data/gridmet/pr_2014.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2014.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2014.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_14.csv")
+```
+
+
+2015
+
+```{r}
+brick <- brick("data/gridmet/pr_2015.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2015.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2015.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_15.csv")
+```
+
+2016
+
+```{r}
+brick <- brick("data/gridmet/pr_2016.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2016.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2016.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4)) 
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_16.csv")
+```
+
+2017
+
+```{r}
+brick <- brick("data/gridmet/pr_2017.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2017.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2017.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_17.csv")
+```
+
+2018
+```{r}
+
+brick <- brick("data/gridmet/pr_2018.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2018.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2018.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_18.csv")
+```
+
+2019
+
+```{r}
+brick <- brick("data/gridmet/pr_2019.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2019.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2019.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_19.csv")
+```
+
+2020
+
+```{r}
+brick <- brick("data/gridmet/pr_2020.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2020.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2020.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_20.csv")
+```
+
+2021
+
+```{r}
+brick <- brick("data/gridmet/pr_2021.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2021.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2021.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_21.csv")
+```
+
+2022
+
+```{r}
+brick <- brick("data/gridmet/pr_2022.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pr_2022.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pr_2022.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pr") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pr_22.csv")
+```
+
+###pet
+2007
+```{r}
+brick <- brick("data/gridmet/pet_2007.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2007.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2007.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_07.csv")
+
+```
+
+
+
+2008
+```{r}
+brick <- brick("data/gridmet/pet_2008.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2008.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2008.csv")
+
+nc_dt_long <- nc_dt %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("X3"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X3", "3")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_08.csv")
+
+```
+
+
+2009
+```{r}
+brick <- brick("data/gridmet/pet_2009.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2009.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2009.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_09.csv")
+
+```
+
+
+2010
+```{r}
+brick <- brick("data/gridmet/pet_2010.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2010.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2010.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_10.csv")
+```
+
+2011
+```{r}
+brick <- brick("data/gridmet/pet_2011.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2011.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2011.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_11.csv")
+```
+
+2012
+```{r}
+
+brick <- brick("data/gridmet/pet_2012.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2012.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2012.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_12.csv")
+```
+
+2013
+```{r}
+
+brick <- brick("data/gridmet/pet_2013.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2013.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2013.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_13.csv")
+```
+
+
+2014
+```{r}
+brick <- brick("data/gridmet/pet_2014.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2014.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2014.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_14.csv")
+```
+
+
+2015
+
+```{r}
+brick <- brick("data/gridmet/pet_2015.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2015.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2015.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_15.csv")
+```
+
+2016
+
+```{r}
+brick <- brick("data/gridmet/pet_2016.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2016.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2016.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_16.csv")
+```
+
+2017
+
+```{r}
+brick <- brick("data/gridmet/pet_2017.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2017.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2017.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_17.csv")
+```
+
+2018
+```{r}
+
+brick <- brick("data/gridmet/pet_2018.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2018.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2018.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_18.csv")
+```
+
+2019
+
+```{r}
+brick <- brick("data/gridmet/pet_2019.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2019.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2019.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_19.csv")
+```
+
+2020
+
+```{r}
+brick <- brick("data/gridmet/pet_2020.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2020.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2020.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_20.csv")
+```
+
+2021
+
+```{r}
+brick <- brick("data/gridmet/pet_2021.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2021.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2021.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_21.csv")
+```
+
+2022
+
+```{r}
+brick <- brick("data/gridmet/pet_2022.nc") # CHANGE
+nc_crop <- crop(brick, aoi)
+nc_extract <- raster::extract(nc_crop, coords_clean)
+nc_spdf <- cbind(coords_clean,nc_extract)
+
+write.table(nc_spdf,
+            "data/gridmet/temp/nc_spdf_dt_pet_2022.csv", # CHANGE
+            append = FALSE,
+            sep = ",",
+            row.names = FALSE, col.names = TRUE)
+
+nc_dt <- read.csv("data/gridmet/temp/nc_spdf_dt_pet_2022.csv")
+
+nc_dt_long <- nc_dt %>% 
+  pivot_longer(
+    cols = starts_with("X4"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pet") %>% # CHANGE
+  dplyr::select(location, lon, lat, date, value, value_type) %>% 
+  mutate(value = (value-273.15))
+
+nc_dt_long$date <- str_replace(nc_dt_long$date, "X4", "4")
+
+nc_dt_long$date <- format(as.Date(as.numeric(nc_dt_long$date),
+                            origin = "1900-01-01"))
+
+unique(nc_dt_long$date)
+# plot to check
+nc_dt_long %>% 
+  filter(location == "Sedgwick") %>% 
+  ggplot(aes(x = date, y = value)) +
+  geom_point() +
+  facet_wrap(~location) +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+# great this works, if this was going to be our final df then i'd save as csv
+#write.csv(nc_dt_long, "data/gridmet/csv/sentinel_pet_22.csv")
+```
+
+##Step 7. Merge value data into 1 csv
+```{r}
+## tmmn
+files <- list.files("data/gridmet/csv/",
+                    pattern = "tmmn",
+                    recursive = TRUE, full.names = TRUE)
+
+merged_files <- read_csv(files) %>% bind_rows()
+
+#write.csv(merged_files, "data/gridmet/csv/merged_0722_tmmn.csv")
+
+
+## tmmx
+files <- list.files("data/gridmet/csv/",
+                    pattern = "tmmx",
+                    recursive = TRUE, full.names = TRUE)
+
+merged_files <- read_csv(files) %>% bind_rows()
+
+#write.csv(merged_files, "data/gridmet/csv/merged_0722_tmmx.csv")
+
+## sph
+files <- list.files("data/gridmet/csv/",
+                    pattern = "sph",
+                    recursive = TRUE, full.names = TRUE)
+
+merged_files <- read_csv(files) %>% bind_rows()
+
+#write.csv(merged_files, "data/gridmet/csv/merged_0722_sph.csv")
+
+
+##pr
+files <- list.files("data/gridmet/csv/",
+                    pattern = "pr",
+                    recursive = TRUE, full.names = TRUE)
+
+merged_files <- read_csv(files) %>% bind_rows()
+
+write.csv(merged_files, "data/gridmet/csv/merged_0722_pr.csv")
+
+
+##pet
+files <- list.files("data/gridmet/csv/",
+                    pattern = "pet",
+                    recursive = TRUE, full.names = TRUE)
+
+merged_files <- read_csv(files) %>% bind_rows()
+
+write.csv(merged_files, "data/gridmet/csv/merged_0722_pet.csv")
+```
+
+##Step 8. Now merge all files for all vars
+```{r}
+files <- #c("data/gridmet/csv/merged__srad.csv" ,"data/gridmet/csv/merged_1024_vs.csv"  )
+        list.files("data/gridmet/csv/",
+                    pattern = "merged_0722",
+                   recursive = TRUE, full.names = TRUE)
+
+
+merged_files <- read_csv(files) %>% bind_rows() 
+
+#unique(merged_files$value_type)
+
+#write.csv(merged_files, "data/gridmet/csv/clean/merged_0722_petprsphtmmntmmx.csv")
+```
+
+##Step 9. Make climate summaries
+```{r}
+## this is daily data 
+merged_data <- read_csv("data/gridmet/csv/clean/merged_0722_petprsphtmmntmmx.csv") %>% 
+  dplyr::select(-c(1:3))
+
+# for each site find mean of value type
+merged_data_monthly <- merged_data %>% 
+  group_by(location, value_type) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  group_by(location, value_type, year, month) %>% 
+  summarise(value_mean = mean(value,na.rm = TRUE)) %>% 
+  dplyr::select(location, year, month, value_type, value_mean)
+
+#write.csv(merged_data_monthly, "data/gridmet/csv/clean/merged_1024_sradvs_monthly.csv")
+```
+
+##Step 10. Turn into wide summaries
+
+Note: daily data is for merging with specific day of collection and some climate figures, monthly is to make quarterly summaries and for figures
+```{r}
+## daily data
+merged_data_daily_wide <- merged_data %>% 
+  pivot_wider(names_from = "value_type",
+              values_from = "value") %>% 
+  mutate(pet = pet+273.15,
+         pr = pr+273.15, #this 0s out pr so assuming this is proper correction
+         sph = sph+273.15)
+#write.csv(merged_data_daily_wide,"data/gridmet/csv/clean/merged_0722_petprsphtmmntmmx_daily_wide.csv")
+
+
+## monthly data
+merged_data_monthly_wide <- merged_data_monthly %>% 
+  pivot_wider(names_from = "value_type",
+              values_from = "value_mean") %>% 
+  mutate(pet = pet+273.15,
+         pr = pr+273.15,
+         sph = sph+273.15)
+
+#write.csv(merged_data_monthly_wide,"data/gridmet/csv/clean/merged_0722_petprsphtmmntmmx_monthly_wide.csv")
+```
+
+##Step 11. Pull down PDSI
+
+Note: it's easier for me to pull down PDSI from terraclim rather than api for gridMET
+
+```{r}
+## pull down data
+tc_palmer = getTerraClim(study_counties, varname = "PDSI", 
+                         startDate = "2007-01-01",
+                         endDate = "2022-12-31") 
+
+## rasterize
+tc_palmer_r <-rast(tc_palmer)
+
+## extract to points
+tc_palmer_points <- terra::extract(tc_palmer_r,vect(coords_clean))
+
+```
+
+##Step 12. Now make PDSI data usable
+```{r}
+
+# convert from wide to long
+test_dt_long <- tc_palmer_points  %>% 
+  pivot_longer(
+    cols = starts_with("PDSI_"),
+    names_to = "date",
+    values_to = "value"
+  ) %>% 
+  mutate(value_type = "pdsi") %>% # would change this for other vars
+  rename(rowid = ID) %>% 
+  mutate(date = str_match(date, "_(.*?)_")[,2],
+         date = ymd(date),
+         year = substr(date,1,4),
+         month = substr(date, 6,7)) %>% 
+  right_join(coords_id, by = "rowid") %>% 
+  dplyr::select(location, lat, lon, 
+                date, year, month, 
+                value, value_type)
+
+pdsi_test_dt_wide <- test_dt_long %>% 
+  pivot_wider(names_from = "value_type",
+              values_from = "value") 
+```
+
+##Step 13 write.csv for PDSI data
+```{r}
+#write.csv(test_dt_long, file = "data/gridmet/csv/pdsi_terra_20072022.csv")
+```
+
+##Step 14. Combine all climate data
+
+(will give daily pdsi to monthly pdsi)
+```{r}
+climate_daily_wide_pdsitmmntmmxpetprsph <- merged_data_daily_wide %>% 
+  mutate(year = substr(date, 1,4),
+         month = substr(date, 6,7)) %>% 
+  right_join(pdsi_test_dt_wide, by = c("location", "year","month")) %>% 
+  rename(pdsi_monthly = pdsi) %>% 
+  dplyr::select(location, lon.x, lat.x, 
+                date.x, year, month,
+                pdsi_monthly, tmmn, tmmx, pet:sph) %>% 
+  rename(lon = lon.x,
+         lat = lat.x,
+         date = date.x)
+
+#write.csv(climate_daily_wide_pdsitmmntmmxpetprsph, file = "climate_daily_wide_pdsitmmntmmxpetprsph_20241023.csv")
+
+
+## monthly data
+climate_monthly_wide_pdsitmmntmmxpetprsph <- pdsi_test_dt_wide %>% 
+  dplyr::select(location, year, month, pdsi) %>% 
+  mutate_at(vars(month, year), as.numeric) %>% 
+  right_join(merged_data_monthly_wide, by = c("location","year", "month")) %>% 
+  dplyr::select(location, year, month,
+                pdsi, tmmn, tmmx, pet:sph)
+
+#write.csv(climate_monthly_wide_pdsitmmntmmxpetprsph, file = "climate_monthly_wide_pdsitmmntmmxpetprsph_20241023.csv")
+```
+
+##Step 15. Make quarterly climate summaries
+```{r}
+tmmn_quarterly <- climate_monthly_wide_pdsitmmntmmxpetprsph %>% 
+  mutate(season = case_when(month < 3 ~ "winter",
+                            month < 7 ~ "spring",
+                            month < 10 ~ "summer",
+                            month < 13 ~ "fall",
+                            TRUE ~ NA)) %>% 
+  group_by(location, year, season) %>% 
+  summarise(tmmn_quarterly = mean(tmmn, na.rm = TRUE)) %>% 
+  pivot_wider(names_from = "season",
+              values_from = "tmmn_quarterly") %>% 
+  rename_with(~paste0("tmmn_", .x), c(fall:winter)) 
+
+tmmx_quarterly <- climate_monthly_wide_pdsitmmntmmxpetprsph %>% 
+  mutate(season = case_when(month < 3 ~ "winter",
+                            month < 7 ~ "spring",
+                            month < 10 ~ "summer",
+                            month < 13 ~ "fall",
+                            TRUE ~ NA)) %>% 
+  group_by(location, year, season) %>% 
+  summarise(tmmx_quarterly = mean(tmmx, na.rm = TRUE)) %>% 
+  pivot_wider(names_from = "season",
+              values_from = "tmmx_quarterly") %>% 
+  rename_with(~paste0("tmmx_", .x), c(fall:winter)) 
+
+
+
+# merge
+temps_quarterly <- tmmn_quarterly %>% 
+  left_join(tmmx_quarterly, by = c("location","year"))
+
+```
+
+##Step 16. Merge quarterly climate summaries with monthly data
+```{r}
+climate_daily_wide_summaries <- climate_daily_wide_pdsitmmntmmxpetprsph %>% 
+  rename_with(~paste0(.x, "_daily"), c(tmmn:sph)) %>%
+  dplyr::select(-pdsi_monthly) %>% 
+  mutate_at(vars(year, month), as.numeric) %>% 
+  left_join(climate_monthly_wide_pdsitmmntmmxpetprsph, by = c("location", "year", "month")) %>% 
+  rename_with(~paste0(.x, "_monthly"), c(pdsi:sph))
+
+
+full_climate_summaries_dailymonthlyquarterly <- climate_daily_wide_summaries %>% 
+  left_join(temps_quarterly, by = c("location", "year"))
+
+```
+
+##Step 17. Write final climate dataset
+```{r}
+#write.csv(full_climate_summaries_dailymonthlyquarterly, file = "full_climate_summaries_dailymonthlyquarterly_20241023.csv")
+
+```
+
+
