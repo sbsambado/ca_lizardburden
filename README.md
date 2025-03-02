@@ -1,5 +1,5 @@
 
-Files are in progress. Need to be cleaned up before publishing. 
+Files are in progress. 
 
 **Title**: Climate-driven variation in the phenology of juvenile _Ixodes pacificus_ on lizard hosts
 
@@ -7,13 +7,10 @@ Files are in progress. Need to be cleaned up before publishing.
 
 **Corresponding author**: sbsambado@ucsb.edu 
 
-Data Prep - disregard these files
-
-+ 1_downloadgridMET.Rmd
-+ 2_DataCleaning.Rmd
-
 **Run these files to recreate figures and analysis**
 
-+ 3_FigureMaking.Rmd
-+ 4_Analysis.Rmd
++ 1_DataCleaning_v2.Rmd
++ 2_Analysis_v2.Rmd
++ 3_Figures_v2.Rmd
+
 
