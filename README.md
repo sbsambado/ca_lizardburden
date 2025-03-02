@@ -1,7 +1,7 @@
 
 Files are in progress. Need to be cleaned up before publishing. 
 
-**Title**: Climate-driven latitudinal variation in juvenile tick seasonality on lizard hosts
+**Title**: Climate-driven variation in the phenology of juvenile _Ixodes pacificus_ on lizard hosts
 
 **Authors**: S Sambado, A Sparkman, A Swei, A MacDonald, H Young, J Salomon, A Crews, K Ring, S Copeland & C Briggs
 
