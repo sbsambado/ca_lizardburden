@@ -1,0 +1,154 @@
+---
+title: "Data Cleaning"
+output: html_document
+date: "2025-03-02"
+---
+
+###Climate-driven variation in the phenology of juvenile Ixodes pacificus on lizard hosts
+
+corresponding author: S. Sambado (sbsambado-at-ucsb.edu) 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## upload necessary libraries
+library(tidyverse)
+library(lubridate)
+
+## upload necessary data
+# lizard-climate
+data_full <- read.csv("data/master_lizardclimate_20241023.csv")
+# full climate 
+climate_full <- read.csv("data/climate_full_clean_20241023.csv") 
+
+```
+
+###Lizard-Climate data
+
+Clean up
+```{r}
+## Clean data that has lizard and climate information
+data <- data_full %>% 
+  # select for collections post 2010
+  filter(year > 2010) %>% 
+  dplyr::select(-c(X, notes)) %>% # get rid of noninformative column
+  mutate(date = ymd(date)) %>% 
+  # fix spelling of lizard species for consistency
+  mutate(lizard_species = case_when(lizard_species == "Sceloporus " ~ "Sceloporus",
+                                  lizard_species == "Sceloporous" ~ "Sceloporus",
+                                  lizard_species == "Elgaria " ~ "Elgaria",
+                                  lizard_species == "Uta.stansburia" ~ "Uta",
+                                  TRUE ~ lizard_species)) %>% 
+  # fix the format of lat, lon 
+  mutate_at(c("lat","lon"),as.numeric) %>% 
+  mutate_at(c("lat","lon"), round, 8) %>%
+  # format climate region
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast",
+                                            "San Francisco Bay Area",
+                                            "San Joaquin Valley",
+                                            "Central Coast",
+                                            "Los Angeles"))) %>% 
+  # make sure locations are in right climate region
+  mutate(climate_region = case_when(
+                            # North Coast
+                            location == "McLaughlin" ~ "North Coast",
+                            
+                            # SF Bay Area
+                            location == "Quail Ridge" ~ "San Francisco Bay Area",
+                            location == "SLRP" ~ "San Francisco Bay Area",
+                            location == "SMI" ~ "San Francisco Bay Area",
+                            location == "CCSP" ~ "San Francisco Bay Area",
+                            location == "CC1" ~ "San Francisco Bay Area",
+                            location == "CC2" ~ "San Francisco Bay Area",
+                            location == "CC3" ~ "San Francisco Bay Area",
+                            location == "CC4" ~ "San Francisco Bay Area",
+                            location == "CC5" ~ "San Francisco Bay Area",
+                            location == "CC6" ~ "San Francisco Bay Area",
+                            location == "CC7" ~ "San Francisco Bay Area",
+                            location == "MW1" ~ "San Francisco Bay Area",
+                            location == "MW2" ~ "San Francisco Bay Area",
+                            location == "MW3" ~ "San Francisco Bay Area",
+                            location == "MW4" ~ "San Francisco Bay Area",
+                            location == "MW5" ~ "San Francisco Bay Area",
+                            location == "MW6" ~ "San Francisco Bay Area",
+                            location == "MW7" ~ "San Francisco Bay Area",
+                            location == "LFY" ~ "San Francisco Bay Area",
+                            location == "TIL" ~ "San Francisco Bay Area",
+                            location == "PR" ~ "San Francisco Bay Area",
+                            location == "San Mateo" ~ "San Francisco Bay Area",
+                            location == "WDLP" ~ "San Francisco Bay Area",
+                            location == "PUG" ~ "San Francisco Bay Area",
+                            location == "FL" ~ "San Francisco Bay Area",
+                            location == "WH" ~ "San Francisco Bay Area",
+                            location == "WP" ~ "San Francisco Bay Area",
+                            location == "HOS" ~ "San Francisco Bay Area",
+                            
+                            # San Joaquin Valley
+                            location == "Arid" ~ "San Joaquin Valley",
+                            location == "Intermediate" ~ "San Joaquin Valley",
+                            location == "Mesic" ~ "San Joaquin Valley",
+                            
+                            # Central Coast Region
+                            location == "Fort Ord" ~ "Central Coast",
+                            location == "Hastings" ~ "Central Coast",
+                            location == "Big Creek" ~ "Central Coast",
+                            location == "Rancho Marino" ~ "Central Coast",
+                            location == "San Luis Obispo" ~ "Central Coast",
+                            location == "Sedgwick" ~ "Central Coast",
+                            location == "Sedgwick Reserve" ~ "Central Coast",
+                            location == "Paradise Rd unburn" ~ "Central Coast",
+                            location == "Santa Barbara" ~ "Central Coast",
+                            location == "Coal Oil Point" ~ "Central Coast",
+                            
+                            # LA Region
+                            location == "Santa Rosa Island" ~ "Los Angeles",
+                            location == "Santa Cruz Island" ~ "Los Angeles",
+                            location == "Santa Monica Mountains" ~ "Los Angeles",
+                            location == "Stunt Ranch" ~ "Los Angeles",
+                            TRUE ~ "FILL"))
+
+## manually fix lat/lon for Arid and Intermediate
+data$lat[data$location == "Arid"] <- "35.024867"
+data$lon[data$location == "Arid"] <- "-118.679283"
+  
+data$lat[data$location == "Intermediate"] <- "34.971886"
+data$lon[data$location == "Intermediate"] <- "-118.591461"
+```
+
+Write csv
+```{r}
+## write csv
+#write.csv(data, file = "data/data_clean_20250302.csv")
+```
+
+###Full Climate data
+Clean up
+```{r}
+## clean climate data for figures
+# make reference list of location-climate region
+clim_regions_slim <- data %>% 
+  dplyr::select(location, climate_region) %>%
+  group_by(location) %>% 
+  slice(1)
+
+# left join with full climate
+climate_full_regions <- climate_full %>% 
+  # add climate region to numeric climate full
+  right_join(clim_regions_slim, by = "location") %>% 
+  # format climate region from N to S
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast",
+                                            "San Francisco Bay Area",
+                                            "San Joaquin Valley",
+                                            "Central Coast",
+                                            "Los Angeles")))
+```
+
+Write csv
+```{r}
+## write csv
+#write.csv(climate_full_regions, file = "data/climate_full_regions_20250302.csv")
+```
+
