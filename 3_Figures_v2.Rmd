@@ -1,0 +1,635 @@
+---
+title: "Figures and Tables"
+output: html_document
+date: "2025-03-02"
+---
+
+###Climate-driven variation in the phenology of juvenile Ixodes pacificus on lizard hosts
+
+corresponding author: S. Sambado (sbsambado-at-ucsb.edu) 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## upload necessary packages
+library(tidyverse)
+library(ggplot2)
+library(tigris)
+library(sf)
+library(ggpubr)
+library(ggspatial)
+library(scales)
+library(mgcv)
+library(cowplot)
+
+## upload necessary data
+# lizard-climate
+data <- read.csv("data/data_clean_20250302.csv")
+# full climate with regional metadata
+climate_full_regions <- read.csv("data/climate_full_regions_20250302.csv")
+# climate region shape files
+ccc4 <- st_read("ccc4_climregions/20241024145312-70108-map-polygon.shp")
+# full climate 
+climate_full <- read.csv("data/climate_full_clean_20241023.csv") 
+
+
+## make universal aesthetics
+# create universal background layer 
+theme_clean <- theme_classic() +
+  theme(axis.title = element_text(face = "bold", size = 14),
+        axis.text = element_text(size = 14))
+# assign colors for each climate region
+colors <- c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144")
+```
+
+
+#Graphical Abstract
+
+part 1. Map of California 
+```{r}
+# make map of CA
+ca_sf <- tigris::states(cb = TRUE) %>% 
+  filter(STATEFP == "06") %>% 
+  st_as_sf() 
+
+# select only 1 location lat lon
+coords <- data %>% 
+  group_by(location, lat, lon) %>% 
+  slice(1) 
+
+# convert lat lon coords into sf object
+coords_sf <- st_as_sf(coords,
+                      coords = c("lon","lat"),
+                      crs = 4326) 
+
+# make base map
+map <-
+ggplot(ca_sf) +
+  geom_sf() +
+  geom_sf(data = ccc4, aes(fill = Name)) +
+  scale_fill_manual(values =c("North Coast"  = "#90be6d",
+                                    "Sacramento Valley" = "grey90",
+                                    "San Francisco Bay Area" = "#43aa8b",
+                                    "San Joaquin Valley"= "#f8961e",
+                                    "Central Coast"= "#f9c74f",
+                                    "Los Angeles"= "#f94144",
+                                    "San Diego" = "grey90",
+                                    "Inland South" = "grey90",
+                                    "Sierra Nevada Mountains N Sierra"= "grey90",
+                      "Sierra Nevada Mountains NE Sierra" = "grey90"
+                      ), breaks = c("North Coast",
+                                    "San Francisco Bay Area",
+                                    "San Joaquin Valley",
+                                    "Central Coast",
+                                    "Los Angeles")) +
+  coord_sf() +
+  theme_pubclean() + 
+  annotation_scale(location = "bl") + # add scale
+  annotation_north_arrow(location = "bl", which_north = "true", pad_y = unit(0.5, "in")) + # add arrow
+  theme(legend.position = c(.81,.8),
+        legend.title = element_text(face = "bold")) +
+  labs(fill = "Climate Region", tag = "A")
+
+# make map + location dots
+fig_ga_ca <- map +
+  geom_sf(data = coords_sf) 
+
+# save image
+#ggsave(fig_ga_ca, file = "figures/post2010/fig_ga_ca.jpeg", dpi = 600)
+```
+
+part 2. Mean ticks per lizard by climate region
+```{r}
+
+## format data
+climjulianagg_larva <- 
+data %>% 
+  mutate(climate_region = case_when(location == "McLaughlin" ~ "San Francisco Bay Area", 
+                                    location == "Arid" ~ "Los Angeles",
+                                    location == "Intermediate" ~ "Los Angeles",
+                                    location == "Mesic" ~ "Los Angeles",
+                                    TRUE ~ climate_region)) %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(larva_mean = mean(total_l, na.rm = TRUE)) %>% 
+  arrange(desc(larva_mean)) %>% 
+  slice(1) 
+
+climjulianagg_nymph <- 
+data %>% 
+  mutate(climate_region = case_when(location == "McLaughlin" ~ "San Francisco Bay Area", 
+                                    location == "Arid" ~ "Los Angeles",
+                                    location == "Intermediate" ~ "Los Angeles",
+                                    location == "Mesic" ~ "Los Angeles",
+                                    TRUE ~ climate_region)) %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(nymph_mean = mean(total_n, na.rm = TRUE)) %>% 
+  arrange(desc(nymph_mean)) %>% 
+  slice(1) 
+
+
+## make ggplot
+# larva
+fig1_b <- data %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(larva_mean = mean(total_l, na.rm = TRUE)) %>% 
+  ggplot(aes(x = julian, y = larva_mean)) +
+  geom_jitter(aes(color = climate_region)) +
+  scale_color_manual(values = colors) +
+  geom_smooth(color = "black", fill = "grey90",
+              aes(ymin = ifelse(..ymin.. <0,0, ..ymin..))) +
+  theme_clean +
+  scale_x_continuous(expand = c(0,0)) +  
+  xlim(60,160) +
+  labs(x = "Julian Date", y = "Mean Ticks per Lizard", tag = "B")  +
+  geom_vline(data = climjulianagg_larva, aes(xintercept = julian, 
+             color = climate_region),  size = 2, alpha = .9, show.legend = FALSE) +
+  annotate("text",label = paste("Larvae"), x = 64, y = 40, fontface = 2) +
+  guides(color = FALSE)
+
+# nymph
+fig1_c <- data %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(nymph_mean = mean(total_n, na.rm = TRUE)) %>% 
+  ggplot(aes(x = julian, y = nymph_mean)) +
+  geom_jitter(aes(color = climate_region)) +
+  scale_color_manual(values = colors) +
+  geom_smooth(color = "black", fill = "grey90",
+              aes(ymin = ifelse(..ymin.. <0,0, ..ymin..))) +
+  theme_clean +
+  scale_x_continuous(expand = c(0,0)) +  
+  xlim(60,160) +
+  labs(x = "Julian Date", y = "Mean Ticks per Lizard") + #, tag = "C")  +
+  geom_vline(data = climjulianagg_nymph, aes(xintercept = julian, 
+             color = climate_region),  size = 2, alpha = .9, show.legend = FALSE) +
+  annotate("text",label = paste("Nymphs"), x = 66, y = 20, fontface = 2) +
+  guides(color = FALSE)
+
+
+fig_bc <- ggarrange(fig1_b + rremove("ylab") + rremove("xlab"), fig1_c+ rremove("ylab"), ncol = 1, align = "hv")
+
+fig_bc_an <- annotate_figure(fig_bc, left = text_grob("Mean Ticks per Lizard", rot = 90, vjust = .5,face = "bold"))
+
+```
+
+part 3. Arrange & save graphical abstract
+```{r}
+fig_1_an <- ggarrange(fig_ga_ca, fig_bc_an)
+
+#ggsave(fig_1_an, file = "figures/fig_1_an.jpeg", dpi = 600,
+#       height = 7, width = 8.5)
+```
+
+#Figure 1 - Climate characteristics
+
+part 1. Map of California 
+
+A. color coded map
+```{r}
+# make california map
+ca_sf <- tigris::states(cb = TRUE) %>% 
+  filter(STATEFP == "06") %>% 
+  st_as_sf() 
+
+# select only 1 location lat lon
+coords <- data %>% 
+  group_by(location, lat, lon) %>% 
+  slice(1) 
+
+# convert lat lon coords into sf object
+coords_sf <- st_as_sf(coords,
+                      coords = c("lon","lat"),
+                      crs = 4326) 
+
+# make base map
+map <-
+ggplot(ca_sf) +
+  geom_sf() +
+  geom_sf(data = ccc4, aes(fill = Name)) +
+  scale_fill_manual(values =c("North Coast"  = "#90be6d",
+                                    "Sacramento Valley" = "grey90",
+                                    "San Francisco Bay Area" = "#43aa8b",
+                                    "San Joaquin Valley"= "#f8961e",
+                                    "Central Coast"= "#f9c74f",
+                                    "Los Angeles"= "#f94144",
+                                    "San Diego" = "grey90",
+                                    "Inland South" = "grey90",
+                                    "Sierra Nevada Mountains N Sierra"= "grey90",
+                      "Sierra Nevada Mountains NE Sierra" = "grey90"
+                      ), breaks = c("North Coast",
+                                    "San Francisco Bay Area",
+                                    "San Joaquin Valley",
+                                    "Central Coast",
+                                    "Los Angeles")) +
+  coord_sf() +
+  theme_pubclean() +
+  annotation_scale(location = "bl") +
+  annotation_north_arrow(location = "bl", which_north = "true", pad_y = unit(0.5, "in")) +
+  theme(legend.position = c(.81,.8),
+        legend.title = element_text(face = "bold")) +
+  labs(fill = "Climate Region", tag = "A")
+
+# make map + location dots
+fig_ga_ca <- map +
+  geom_sf(data = coords_sf) 
+```
+
+part 2. Climate figures
+
+B. Cumulative degree days (CDD)
+```{r}
+## format CDD data
+# set thresholds
+thresh_low <- 12 # 55 F
+thresh_up <- 34 # 93F
+baseline_temp <- 10 # 50F
+
+# calculate cdd
+cdd_location_year <- climate_full  %>% 
+  group_by(location, lat, lon) %>% 
+  na.omit() %>% 
+  mutate(temp_avg = (tmmx_daily + tmmn_daily)/2) %>% 
+  mutate(daily_cdd = pmax(temp_avg - baseline_temp,0)) %>%
+  filter(month < 4) %>% 
+  group_by(location,year) %>% 
+  summarise(cumulative_cdd = sum(daily_cdd)) 
+
+## plot
+fig_1_cdd <- cdd_location_year %>% 
+  right_join(clim_regions_slim, by = "location") %>% 
+  mutate(log_cdd = log(cumulative_cdd)) %>% 
+  filter(log_cdd < 10) %>% 
+  filter(year > 2012 &
+           climate_region != "North Coast" &
+           climate_region != "San Joaquin Valley") %>% 
+  ggplot(aes(x = climate_region, y = log_cdd)) +
+  geom_boxplot(aes(fill = climate_region)) +
+  scale_x_discrete(
+                   limits = c("San Francisco Bay Area" = "San Francisco Bay Area",
+                              "Central Coast" = "Central Coast",
+                              "Los Angeles" = "Los Angeles" ),
+                   labels = c("San Francisco Bay Area" = "SF",
+                              "Central Coast" = "CC",
+                              "Los Angeles" = "LA" )) +
+  theme_clean +
+  scale_fill_manual(values =  c(#"North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            #"San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144")) +
+  guides(fill = FALSE) +
+  labs(x = "", y = "log(CDD > 10°C) prior to April", tag = "A") +
+  #theme(axis.text.x = element_text(angle = 90))+
+  annotate("text", x = 2.3, y = 9,label = "CDD = cumulative degree days", size = 3)
+
+
+
+```
+
+C. Maximum Temperature (C) - tmmx_monthly
+```{r}
+fig_1_tmax_monthly <- climate_full_regions %>% 
+  filter(year > 2012 &
+           climate_region != "North Coast" & # changed this
+           climate_region != "San Joaquin Valley") %>% # changed this
+  group_by(climate_region, year) %>% 
+  summarise(mean = mean(tmmx_monthly, na.rm = TRUE)) %>% 
+  ggplot(aes(x = year, y = mean,color = climate_region)) +
+  geom_smooth(fill = "grey95", size = 1.2) + #fill = "grey90",
+  theme_clean +
+  scale_color_manual(values = c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144")) +
+  scale_x_continuous(expand = c(0,0.18), breaks = seq(2013,2022,3)) +
+  labs(x = "", y = "Monthly Max Temp (°C)", tag = "C")+
+  guides(color = FALSE) #+
+  theme(axis.text.x = element_text(hjust = .7,size = 12))
+```
+
+D. Specific humidity (mg/kg) - sph_monthly
+```{r}
+fig_1_sph_monthly <-
+climate_full_regions %>% 
+  filter(year > 2012 &
+           climate_region != "North Coast" & 
+           climate_region != "San Joaquin Valley") %>% 
+  group_by(climate_region, year) %>% 
+  summarise(mean = mean(sph_monthly, na.rm = TRUE)) %>% 
+  ggplot(aes(x = year, y = mean,color = climate_region)) +
+  geom_smooth(fill = "grey95", size = 1.2) + #fill = "grey90",
+  theme_clean +
+  scale_color_manual(values = c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144")) +
+  scale_x_continuous(expand = c(0,0.18), breaks = seq(2013,2022,3)) +
+  labs(x = "", y = "Monthly Specific Humidity", tag = "D")+
+  guides(color = FALSE)+
+    scale_y_continuous(labels = label_number(scale = 1000, accuracy = .1)) #+
+  theme(axis.text.x = element_text(hjust = .7,size = 12))
+```
+
+E. Palmer Drought Severity Index (PDSI)  - pdsi_monthly
+```{r}
+fig_1_pdsi_monthly <-
+climate_full_regions %>% 
+  filter(year > 2012 &
+           climate_region != "North Coast" & 
+           climate_region != "San Joaquin Valley") %>% 
+  group_by(climate_region, year) %>% 
+  summarise(mean = mean(pdsi_monthly, na.rm = TRUE)) %>% 
+  ggplot(aes(x = year, y = mean,color = climate_region)) +
+  geom_smooth(fill = "grey95", size = 1.2) + #fill = "grey90",
+  theme_clean +
+  scale_color_manual(values = c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144")) +
+  scale_x_continuous(expand = c(0,0.18), breaks = seq(2013,2022,3)) +
+  labs(x = "", y = "Monthly Drought Index (PDSI)", tag = "D")+
+  guides(color = FALSE) +
+  geom_hline(yintercept = 0, lty = 2) +
+  annotate("text",label = paste("wet"), x = 2013.8, y = 2,fontface = 2, size = 6)+
+  annotate("text",label = paste("dry"), x = 2013.8,  y = -2,fontface = 2, size = 6)
+
+```
+
+part 3. Arrange climate figures
+```{r}
+# fix labels for ggarrange
+fig_1_cdd_an <-fig_1_cdd + labs(y = "log(CDD > 10°C)", tag = "B ")
+fig_1_tmax_monthly_an <- fig_1_tmax_monthly + labs(y = "Max Temp °C", tag = "C ")
+fig_1_sph_monthly_an <- fig_1_sph_monthly + labs(y = "Humidity mg/kg", tag = "D ") 
+fig_1_pdsi_monthly_an <- fig_1_pdsi_monthly + labs(y = "Drought Index PDSI", tag = "E ") 
+
+# make ggarrance
+fig_1_climatevars <- ggarrange(fig_1_cdd_an , 
+          fig_1_tmax_monthly_an, 
+          fig_1_sph_monthly_an, 
+          fig_1_pdsi_monthly_an,
+          align = "hv")
+
+#ggsave(fig_1_climatevars, file = "figures/post2010/fig_1_climatevars.jpeg", dpi = 600)
+```
+
+
+#Figure 2 - Mean tick burdens
+
+part 1. calculate means
+```{r}
+mean_l <- data %>% 
+  filter(climate_region != "North Coast" &
+           climate_region != "San Joaquin Valley") %>% 
+   filter(month > 2) %>% 
+  filter(!is.na(total_l) &
+           !is.na(total_n)) %>%
+   group_by(climate_region, month) %>% 
+  summarise(mean = mean(total_l, na.rm = TRUE),
+            sd = sd(total_l, na.rm = TRUE)) %>% 
+  mutate(lifestage = "Larvae")
+
+mean_n <- data %>% 
+  filter(climate_region != "North Coast" &
+           climate_region != "San Joaquin Valley") %>% 
+   filter(month > 2) %>% 
+  filter(!is.na(total_l) &
+           !is.na(total_n)) %>%
+   group_by(climate_region, month) %>% 
+  summarise(mean = mean(total_n, na.rm = TRUE),
+            sd = sd(total_l, na.rm = TRUE)) %>% 
+  mutate(lifestage = "Nymphs")
+
+mean <- rbind(mean_l, mean_n) %>% 
+  mutate(climate_region = factor(climate_region,
+                                 levels = c(#"North Coast",
+                                            "San Francisco Bay Area",
+                                            #"San Joaquin Valley",
+                                            "Central Coast",
+                                            "Los Angeles")))
+```
+
+part 2. plot means
+```{r}
+fig_2_mean_CR3 <- mean %>% 
+ ggplot(aes(x = month, y = mean, fill = lifestage)) +
+    geom_errorbar(aes(ymin = mean, ymax = mean+sd), 
+                  position = position_dodge2(width = .01, padding = .5)) +
+  geom_col(stat = "identity", position = "dodge") +
+     facet_wrap(~climate_region, ncol = 1, scale = "free_y") +
+     theme_minimal() + #minimal light pubclean
+     theme(strip.text = element_text(face = "bold", size = 11),#13
+           axis.title.y = element_text(size = 12),
+           axis.text.x = element_text(size = 12),
+           panel.grid.major.x = element_blank(),
+           panel.grid.minor.x = element_blank(),
+           panel.grid.minor.y = element_blank(),
+           legend.position = "right") +
+     labs(x = "", y = "Mean Tick Burden on Individual Lizard", fill = "Life stage") +
+     scale_x_continuous(breaks = c(3,4,5,6),
+                      labels = c("March", "April", "May", "June")) +
+     scale_fill_manual(values = c("#004488","#ddaa33")) +
+  scale_y_continuous(labels = label_number(accuracy = 1))
+
+#ggsave(fig_2_mean_CR3, file = "figures/post2010/fig_2_mean_CR3.jpeg", dpi = 600)
+
+```
+
+#Figure 3 - GAMS
+
+part 1. Run model
+```{r}
+mod_monthly_3cr <- gam(total_ticks ~ 
+             s(tmmx_monthly, by = climate_region, bs = "cr") +
+             s(sph_monthly, by = climate_region) +
+             s(pdsi_monthly, by = climate_region) +
+              s(lon, lat, bs = "gp") 
+             + climate_region, # fixed effect
+           data = data_3climateregions, 
+           method = "REML",
+           family = tw(link = "log"))
+```
+
+part 2. Plot individual climate relationships
+
+Maximum Temperature (C) - tmmx_monthly
+```{r}
+par(mfrow = c(1,3))
+
+## SF
+plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly Max Temp (°C)",
+         main = "SF",
+         select = 1,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+
+## CC
+  plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly Max Temp (°C)",
+         main = "CC",
+         select = 2,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+
+## LA
+  plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly Max Temp (°C)",
+         main = "LA",
+         select = 3,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+mod_monthly_tmmx <- recordPlot()
+
+mod_total_tmmx <- plot_grid(mod_monthly_tmmx, align = "hv")
+
+#ggsave(mod_total_tmmx, file = "figures/post2010/mod_total_tmmx.jpeg",
+#       height = 3)
+```
+
+Specific humidity (mg/kg) - sph_monthly
+```{r}
+par(mfrow = c(1,3))
+
+## SF
+plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly Specific Humidity",
+         main = "SF",
+         select = 4,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+
+## CC
+  plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly Specific Humidity",
+         main = "CC",
+         select = 5,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+
+
+## LA
+  plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly Specific Humidity",
+         main = "LA",
+         select = 6,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+mod_monthly_sph <- recordPlot()
+
+mod_total_sph <- plot_grid(mod_monthly_sph, align = "hv")
+
+#ggsave(mod_total_sph, file = "figures/post2010/mod_total_sph.jpeg", height = 3)
+```
+
+Palmer Drought Severity Index (PDSI)  - pdsi_monthly
+```{r}
+par(mfrow = c(1,3))
+
+## SF
+plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly PDSI",
+         main = "SF",
+         select = 7,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+
+## CC
+  plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly PDSI",
+         main = "CC",
+         select = 8,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+
+## LA
+    plot.gam(mod_monthly_3cr,
+         se = TRUE,
+         shade = TRUE, 
+         shade.col = "lightblue",
+         lwd = 2,
+         ylab = "Juvenile Tick Burden",
+         xlab = "Monthly PDSI",
+         main = "LA",
+         select = 9,
+         scale = 0,
+         #pages = 2,
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1])
+mod_monthly_pdsi <- recordPlot()
+
+mod_total_pdsi <- plot_grid(mod_monthly_pdsi, align = "hv")
+
+#ggsave(mod_total_pdsi, file = "figures/post2010/mod_total_pdsi.jpeg", height = 3)
+```
