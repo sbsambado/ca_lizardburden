@@ -1,0 +1,341 @@
+---
+title: "Analysis"
+output: html_document
+date: "2025-03-02"
+---
+
+###Climate-driven variation in the phenology of juvenile Ixodes pacificus on lizard hosts
+
+corresponding author: S. Sambado (sbsambado-at-ucsb.edu) 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## upload necessary libraries
+library(tidyverse)
+library(reshape2)
+library(mgcv)
+
+## upload necessary data
+# lizard-climate
+data <- read.csv("data/data_clean_20250302.csv")
+
+# full climate
+climate_full_regions <- read.csv("data/climate_full_regions_20250302.csv")
+```
+
+#Main Text
+
+#Abstract
+```{r}
+# range of years
+data %>% 
+  summarise(year = range(year)) # 2013 - 2022
+
+# how many lizards?
+dim(data) # 1527
+
+# how many locations? 
+data %>% 
+  dplyr::select(location, lat, lon) %>% 
+  unique # 45
+
+# what was the range of mean abundance per lizard?
+data %>% 
+  group_by(location) %>% 
+  summarise(total_mean = mean(total_ticks, na.rm = TRUE)) %>% 
+  arrange(total_mean)
+# Coal Oil Point 0.1666667	
+# CCSP 47.2058824	
+
+```
+
+#Methods
+```{r}
+
+# range of years
+data %>% 
+  summarise(year = range(year)) # 2013 - 2022
+
+
+# how many locations? 
+data %>% 
+  dplyr::select(location, lat, lon) %>% 
+  unique # 45
+
+
+# how many sampling days?
+data %>% 
+  dplyr::select(location, year, julian) %>% 
+  unique # 253
+
+# how many times were locations sampled?
+data %>% 
+  group_by(location, lat, lon) %>% 
+  tally() %>% 
+  # filter(n > 1) # 42
+  filter(n >= 3) # 38
+
+```
+
+#Results
+
+##Part 1. Characterization of seasonal dynamics
+
+###Field collection summary
+```{r}
+# how many lizards
+dim(data) #1527
+
+# which species of lizards?
+data %>% 
+  group_by(lizard_species) %>% 
+  tally() %>% 
+  mutate(prop = n/1527) # calculate proportion of each species
+
+
+# how many ticks?
+data %>% 
+  summarise(total = sum(total_ticks, na.rm = TRUE)) # 9338	
+
+# how many ticks identified to larvae
+data %>% 
+  summarise(total = sum(total_l, na.rm = TRUE)) # 4197	
+
+# how many ticks identified to nymph
+data %>% 
+  summarise(total = sum(total_n, na.rm = TRUE)) # 3239	
+
+
+# what proportion were identified?
+(3239	+ 4197)/9338 # 0.7963161
+```
+
+###Seasonal patterns of juvenile ticks
+```{r}
+# what was the range of mean abundance per lizard?
+data %>% 
+  group_by(location) %>% 
+  summarise(total_mean = mean(total_ticks, na.rm = TRUE)) %>% 
+  arrange(total_mean)
+# Coal Oil Point 0.1666667	
+# CCSP 47.2058824	
+
+# how did these burdens vary by climate region
+data %>% 
+  filter(climate_region != "North Coast" & climate_region != "San Joaquin Valley") %>% 
+  group_by(climate_region) %>% 
+  summarise(total_mean = mean(total_ticks, na.rm = TRUE),
+            sd = sd(total_ticks, na.rm = TRUE)) %>% 
+  arrange(desc(total_mean))
+
+
+## which region had greatest proportion of 0 tick burdens?
+data %>% 
+    filter(climate_region != "North Coast" & climate_region != "San Joaquin Valley") %>% 
+  group_by(climate_region) %>% 
+  filter(month > 2 & month < 7) %>% 
+    mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  filter(total_ticks == 0) %>% # select for lizards with 0 burdens
+  tally() %>%
+  mutate(prop = n/sum(n)) %>% # calc proportions
+  arrange(desc(prop))
+```
+
+###Phenological Dates
+Peak abundance
+```{r}
+##larva
+data %>% 
+  filter(month > 2 & month < 7) %>% # select during peak seasonal months
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(total_l = mean(total_l, na.rm = TRUE)) %>% 
+  arrange(desc(total_l)) %>% 
+  slice(1) %>% 
+  # omit regions that are not the main focus of analysis
+  filter(climate_region != "North Coast" & climate_region != "San Joaquin Valley") 
+
+##nymph
+data %>% 
+  filter(month > 2 & month < 7) %>% 
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(total_n = mean(total_n, na.rm = TRUE)) %>% 
+  arrange(desc(total_n)) %>% 
+  slice(1) %>% 
+  # omit regions that are not the main focus of analysis
+  filter(climate_region != "North Coast" & climate_region != "San Joaquin Valley") 
+```
+
+###Overlap metrics
+Kernel Density Estimates (KDE)
+```{r}
+## Kernal Density Estimates (KDE)
+
+tick_data_kde <- data %>% 
+    filter(month > 2 & month < 7) %>% # select during peak seasonal months
+    filter(climate_region == "San Francisco Bay Area") %>% # change this out for region
+  # filter(climate_region == "Central Coast") %>% # change this out for region
+  # filter(climate_region == "Los Angeles") %>% # change this out for region
+  group_by(julian) %>% 
+  summarise(total_l = mean(total_l, na.rm = TRUE),
+            total_n = mean(total_n, na.rm = TRUE)) %>% 
+  dplyr::select(julian, total_l, total_n) %>% 
+  rename(Date = julian,
+         Larvae_Count = total_l,
+         Nymphs_Count = total_n) %>% 
+  na.omit()
+
+# Create density estimates
+larval_density <- density(tick_data_kde$Larvae_Count, from = 0, to = max(tick_data_kde$Larvae_Count))#, n = 512)
+nymphal_density <- density(tick_data_kde$Nymphs_Count, from = 0, to = max(tick_data_kde$Nymphs_Count))#, n = 512)
+
+# Calculate overlap area
+# After obtaining KDEs for both groups, you can analyze how much they overlap. 
+overlap_area <- sum(pmin(larval_density$y, nymphal_density$y)) * (larval_density$x[2] - larval_density$x[1])
+overlap_area
+
+
+# San Francisco Bay Area 0.8881365
+# Central Coast 0.3201129
+# Los Angeles 0.2953363
+```
+
+Jaccard Index (JI)
+```{r}
+tick_data_ji <- data %>% 
+    filter(climate_region == "San Francisco Bay Area") %>% # change this out for region
+  # filter(climate_region == "Central Coast") %>% # change this out for region
+  # filter(climate_region == "Los Angeles") %>% 
+  filter(month > 2 & month < 7) %>% 
+  group_by(climate_region, julian) %>%  
+  summarise(total_l = mean(total_l, na.rm = TRUE),
+            total_n = mean(total_n, na.rm = TRUE)) %>% 
+  dplyr::select(julian, total_l, total_n) %>% 
+  rename(Date = julian,
+         Larvae_Count = total_l,
+         Nymphs_Count = total_n) %>% 
+  na.omit()
+
+# format data
+tick_long <- melt(tick_data_ji, id.vars = "Date", variable.name = "Tick_Type", value.name = "Count")
+
+# calculate
+overlap_count <- sum(pmin(tick_data_ji$Larvae_Count, tick_data_ji$Nymphs_Count))
+total_count <- sum(pmax(tick_data_ji$Larvae_Count, tick_data_ji$Nymphs_Count))
+
+# Jaccard index
+jaccard_index<- overlap_count / total_count
+jaccard_index
+
+# SF 0.4725434
+# Central Coast  0.3800453
+# Los Angeles 0.223288
+```
+
+
+##Part 2
+Climate associations with phenological metrics
+
+Format data for models
+```{r}
+data_3climateregions <- data %>%  
+  # mutate NC & SJV to main climate groups
+  mutate(climate_region = case_when(climate_region == "North Coast" ~ "San Francisco Bay Area",
+                                    climate_region == "San Joaquin Valley" ~ "Los Angeles",
+                                    TRUE ~ climate_region)) %>%
+  # format climate region N to S
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("San Francisco Bay Area",
+                                            "Central Coast",
+                                            "Los Angeles"))) %>% 
+  # make sure lat/lon are numeric
+  mutate(lat = as.numeric(lat),
+         lon = as.numeric(lon))
+
+
+```
+
+Model 1 - total ticks ~ s(abiotic, by = CR) + CR
+CR = climate region (i.e., San Francisco Bay Area (SF), Central Coast (CC), Los Angeles Region (LA))
+
+###All ticks
+```{r}
+## run model
+mod_monthly_3cr <- gam(total_ticks ~ 
+               # monthly max temp
+             s(tmmx_monthly, by = climate_region, bs = "cr") +
+               # monthly specific humidity 
+             s(sph_monthly, by = climate_region) +
+               # monthly palmer drought severity index
+             s(pdsi_monthly, by = climate_region) +
+               # account for spatial autocorrelation
+              s(lon, lat, bs = "gp") # gaussian process
+             + climate_region, # fixed effect
+           data = data_3climateregions, 
+           method = "REML",
+           family = tw(link = "log")) # tweedie distribution
+
+## look at model summary
+summary(mod_monthly_3cr)
+
+
+## check model diagnostics
+gam.check(mod_monthly_3cr)
+
+```
+
+
+###Larvae
+```{r}
+## run model
+mod_monthly_3cr_larvae <- gam(total_l ~ 
+             s(tmmx_monthly, by = climate_region, bs = "cr") +
+             s(sph_monthly, by = climate_region) +
+             s(pdsi_monthly, by = climate_region) +
+             climate_region, # fixed effect
+           data = data_3climateregions, 
+           method = "REML",
+           family = tw(link = "log"))
+
+## look at model summary
+summary(mod_monthly_3cr_larvae)
+
+
+## check model diagnostics
+gam.check(mod_monthly_3cr_larvae)
+```
+
+
+###Nymphs
+```{r}
+## run model
+mod_monthly_3cr_nymphs <- gam(total_n ~ 
+             s(tmmx_monthly, by = climate_region, bs = "cr") +
+             s(sph_monthly, by = climate_region) +
+             s(pdsi_monthly, by = climate_region) +
+             climate_region, # fixed effect
+           data = data_3climateregions, 
+           method = "REML",
+           family = tw(link = "log"))
+
+## look at model summary
+summary(mod_monthly_3cr_nymphs)
+
+
+## check model diagnostics
+gam.check(mod_monthly_3cr_nymphs)
+
+```
+
