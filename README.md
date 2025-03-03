@@ -1,5 +1,7 @@
 
-Files are in progress. 
+**Journal**: Parasites & Vectors
+
+**doi**: in press
 
 **Title**: Climate-driven variation in the phenology of juvenile _Ixodes pacificus_ on lizard hosts
 
@@ -13,6 +15,7 @@ Files are in progress.
 + 2_Analysis_v2.Rmd
 + 3_Figures_v2.Rmd
 + 4_SupplementalMaterial.Rmd
-  
+
+**Data Dryad**: in progress
 
 
