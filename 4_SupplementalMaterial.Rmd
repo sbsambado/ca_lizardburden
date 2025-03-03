@@ -1,0 +1,583 @@
+---
+title: "Supplemental Material"
+output: html_document
+date: "2025-03-02"
+---
+
+###Climate-driven variation in the phenology of juvenile Ixodes pacificus on lizard hosts
+
+corresponding author: S. Sambado (sbsambado-at-ucsb.edu) 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## upload necessary packages
+library(tidyverse)
+library(ggplot2)
+library(ggcorrplot)
+library(reshape2)
+library(mgcv)
+
+## upload necessary data
+# lizard-climate
+data <- read.csv("data/data_clean_20250302.csv")
+# full climate 
+climate_full <- read.csv("data/climate_full_clean_20241023.csv") 
+
+## make universal aesthetics
+# create universal background layer 
+theme_clean <- theme_classic() +
+  theme(axis.title = element_text(face = "bold", size = 14),
+        axis.text = element_text(size = 14))
+# assign colors for each climate region
+colors <- c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144")
+```
+
+#Supplemental
+
+##Additional File 1 -- Sampling location and frequency
+
+###Table S1 -- location coordinates
+```{r}
+table_sup_1_1 <- data %>% 
+  dplyr::select(location, collector, lat, lon) %>%
+  unique() %>% 
+  mutate(across(c(lat:lon), round,5)) %>% 
+  arrange(desc(lat))
+
+#write.csv(table_sup_1_1,file = "table_sup_1_1.csv",
+#            row.names = FALSE,quote = FALSE)
+
+```
+
+
+###Table S2 -- location sampling dates
+```{r}
+table_sup_1_2 <- data %>% 
+  filter(month != 9) %>% 
+  group_by(location, year, month) %>% 
+  tally() %>% 
+  pivot_wider(names_from = month, values_from = n)
+
+#write.csv(table_sup_1_2,file = "table_sup_1_2.csv",
+#            row.names = FALSE,quote = FALSE)
+```
+
+
+##Additional File 2 -- Location characteristics
+
+###Figure S1 - Sampling frequencies
+```{r}
+fig_sup_2_1_samplingfrequency <- 
+data %>% 
+  mutate(location = case_when(location == "Santa Monica Mountains" ~ "SM Mtns",
+                              location == "Sedgwick Reserve" ~ "Sedgwick-Sp",
+                              location == "Sedgwick" ~ "Sedgwick-Sa",
+                              location == "Santa Rosa Island"~ "SR Island",
+                              location == "Santa Cruz Island" ~ "SC Island",
+                              location == "Paradise Rd unburn" ~ "Paradise Rd",
+                              location == "San Luis Obispo" ~ "SLO",
+                              TRUE ~ location),
+         lat = case_when(location == "Intermediate" ~ 34.97000, # fix so Tejon is next to eachother on y axis
+                              TRUE ~ lat)) %>% 
+  group_by(location, date, lat, climate_region) %>% 
+  tally() %>% 
+  ggplot(aes(x = n, y = reorder(location, lat))) +
+  geom_bar(stat = "identity", aes(fill = climate_region)) +
+  scale_fill_manual(values =  c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144"), 
+            breaks = c("North Coast", "San Francisco Bay Area","San Joaquin Valley",
+                       "Central Coast", "Los Angeles")) +
+  theme_clean +
+  scale_y_discrete(guide = guide_axis(n.dodge = 2)) +
+  theme(axis.text.y = element_text(size = 8),
+        legend.position = c(.7,.65),
+        legend.title = element_text(face = "bold")) +
+  labs(x = "Location Visit Frequency",y = "", fill = "Climate Region") +
+  geom_vline(xintercept = 3, lty = 2) +
+    scale_x_continuous(expand = c(0,0)) +
+  annotate(geom = "text", x = 85, y = 31, label = "38°N", size = 6) +
+  annotate(geom = "text", x = 85, y = 4, label = "33°N", size = 6)
+  
+#38.87289
+#33.9773
+
+#ggsave(fig_sup_2_1_samplingfrequency, file = "figures/post2010/fig_sup_2_1_samplingfrequency.jpeg", dpi = 600,
+#       height = 5, width = 5)
+
+
+```
+
+###Figure S2 -- lizard captures
+```{r}
+fig_sup_2_2_lizardcaptures <- 
+data %>% 
+  mutate(location = case_when(location == "Santa Monica Mountains" ~ "SM Mtns",
+                              location == "Sedgwick Reserve" ~ "Sedgwick-Sp",
+                              location == "Sedgwick" ~ "Sedgwick-Sa",
+                              location == "Santa Rosa Island"~ "SR Island",
+                              location == "Santa Cruz Island" ~ "SC Island",
+                              location == "Paradise Rd unburn" ~ "Paradise Rd",
+                              location == "San Luis Obispo" ~ "SLO",
+                              TRUE ~ location),
+         lat = case_when(location == "Intermediate" ~ 34.97000, # fix so Tejon is next to eachother on y axis
+                              TRUE ~ lat)) %>% 
+  group_by(location, lat, climate_region, date) %>% 
+  tally() %>% 
+  ggplot(aes(x = n, y = reorder(location, lat))) +
+  geom_boxplot(aes(fill = climate_region)) +
+  scale_fill_manual(values =  c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144"), 
+            breaks = c("North Coast", "San Francisco Bay Area","San Joaquin Valley",
+                       "Central Coast", "Los Angeles")) +
+  theme_clean +
+  scale_y_discrete(guide = guide_axis(n.dodge = 2)) +
+  theme(axis.text.y = element_text(size = 8),
+        legend.position = "bottom",
+        #legend.position = c(.8,.62),
+        legend.title = element_text(face = "bold")) +
+  labs(x = "Total Lizards Observed",y = "", fill = "")+
+    scale_x_continuous(expand = c(0,0)) +
+  guides(fill = guide_legend(nrow = 3)) 
+
+#ggsave(fig_sup_2_2_lizardcaptures, file = "figures/post2010/fig_sup_2_2_lizardcaptures.jpeg", 
+#       dpi = 600,height = 5, width = 5)
+```
+
+###Table S1 -- tick mean and standard deviation
+```{r}
+table_sup_2_1 <- data %>% 
+  group_by(location, lat) %>% 
+  summarise(mean_total = mean(total_ticks, na.rm = TRUE),
+            sd_total = sd(total_ticks, na.rm = TRUE),
+            mean_l = mean(total_l, na.rm = TRUE),
+            sd_l = sd(total_l, na.rm = TRUE),
+            mean_n = mean(total_n, na.rm = TRUE),
+            sd_n = sd(total_n, na.rm = TRUE)) %>% 
+  mutate(across(c(mean_total:sd_n), round,3)) %>% 
+  arrange(desc(lat))
+
+#write.csv(table_sup_2_1,file = "table_sup_2_1.csv",col.names = FALSE,
+#            row.names = FALSE,quote = FALSE)
+```
+
+##Additional File 3 -- correlations
+
+###Figure S1 -- Correlation
+```{r}
+
+fig_sup_3_1_correlations_numeric <- 
+data %>% 
+  dplyr::select(tmmn_daily:tmmx_winter) %>% drop_na()
+
+corr <- round(cor(fig_sup_3_1_correlations_numeric),1)
+
+fig_sup_3_1_correlations <- ggcorrplot(corr,
+           hc.order = TRUE,
+           type = "upper",
+           outline.col = "white",
+           ggtheme = ggplot2::theme_light(),
+           colors = c("#6d9ec1", "white","#e46726"),
+           tl.cex = 8)
+
+#ggsave(fig_sup_3_1_correlations, file = "figures/post2010/fig_sup_3_1_correlations.jpeg", dpi = 600,
+#       height = 5, width = 5)
+
+```
+##Additional File 4 -- Phenological metrics
+
+###Figure S1 -- histogram of juvenile burdens
+```{r}
+
+
+fig_sup_4_1a <- data %>% 
+  filter(climate_region == "Central Coast"|
+         climate_region == "Los Angeles" |
+           climate_region == "San Francisco Bay Area") %>% 
+  group_by(location, date, climate_region) %>% 
+  summarise(mean_larvae = mean(total_l, na.rm = TRUE)) %>% 
+  ggplot(aes(x = mean_larvae))+
+  geom_histogram(fill = "grey95", color = "grey15") +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  theme_clean +
+  facet_wrap(~factor(climate_region, c("San Francisco Bay Area",
+                                       "Central Coast",
+                                       "Los Angeles")), ncol = 1) +
+  theme_minimal() +
+  theme(strip.text = element_text(face= "bold", size = 12)) +
+  labs(x = "Mean Larvae on Individual Lizard", y = "Frequency",
+       tags = "A")
+
+
+fig_sup_4_1b <- data %>% 
+  filter(climate_region == "Central Coast"|
+         climate_region == "Los Angeles" |
+           climate_region == "San Francisco Bay Area") %>% 
+  group_by(location, date, climate_region) %>% 
+  summarise(mean_nymphs = mean(total_n, na.rm = TRUE)) %>% 
+  ggplot(aes(x = mean_nymphs))+
+  geom_histogram(fill = "grey95", color = "grey15") +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  theme_clean +
+  facet_wrap(~factor(climate_region, c("San Francisco Bay Area",
+                                       "Central Coast",
+                                       "Los Angeles")), ncol = 1) +
+  theme_minimal() +
+  theme(strip.text = element_text(face= "bold", size = 12)) +
+  labs(x = "Mean Nymphs on Individual Lizard", y = "Frequency",
+       tags = "B")
+
+
+fig_sup_4_1 <- ggarrange(fig_sup_4_1a ,fig_sup_4_1b)
+
+#ggsave(fig_sup_4_1, file = "figures/post2010/fig_sup_4_1.jpeg", dpi = 600,
+#       height = 5, width = 7)
+
+```
+
+
+###Figure S2 -- juvenile burdens by month and year
+```{r}
+fig_sup_4_1a <- data %>% 
+  filter(month != 9) %>% 
+  group_by(climate_region,location, date, month) %>% 
+  ggplot(aes(x = as.factor(month), y = total_ticks))  +
+  scale_color_manual(values =  c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144")) +
+    geom_jitter(aes(color = climate_region), alpha = .5, width = .25) +
+    geom_boxplot(fill = "grey90") +
+  theme_clean +
+  scale_x_discrete(labels = c("Feb", "March", "April", 
+                              "May", "June")) +
+  labs(x = "", y = "Raw Tick Counts per Lizard", color = "", tag = "A") +
+  #guides(color = FALSE)
+  theme(legend.position = "bottom",
+        legend.title = element_text(face = "bold")) +
+  guides(color = guide_legend(nrow = 1) ) 
+
+
+fig_sup_4_1b <- data %>% 
+  group_by(climate_region,location, date, year) %>% 
+  ggplot(aes(x = as.factor(year), y = total_ticks)) +
+  scale_color_manual(values =  c("North Coast" = "#90be6d",
+            "San Francisco Bay Area" = "#43aa8b",
+            "San Joaquin Valley" = "#f8961e",
+            "Central Coast" = "#f9c74f", 
+            "Los Angeles" = "#f94144")) +
+    geom_jitter(aes(color = climate_region), alpha = .5, width = .25) +
+    geom_boxplot(fill = "grey90") +
+  theme_clean +
+  labs(x = "", y = "Raw Tick Counts per Lizard", color = "", tag = "B") +
+  theme(legend.position = "bottom",
+        legend.title = element_text(face = "bold")) +
+  guides(color = guide_legend(nrow = 1) )
+
+fig_sup_4_1 <- ggarrange(fig_sup_4_1a, fig_sup_4_1b + rremove("ylab"),
+          common.legend = TRUE, ncol = 2,
+          legend = "bottom",
+          align = "hv", widths = c(.8,1))
+
+#ggsave(fig_sup_4_1, file = "figures/post2010/fig_sup_4_1.jpeg", dpi = 600,
+#       height = 5, width = 10)
+
+```
+###Table S1 -- Phenology metrics
+
+Density
+```{r}
+#table_sup_2_1 <- data
+
+# Total
+data_post2010 %>% 
+  group_by(climate_region) %>% 
+  filter(month > 2 & month < 7) %>% 
+    mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  summarise(total_mean = mean(total_ticks, na.rm = TRUE),
+            total_sd = sd(total_ticks, na.rm = TRUE)) %>% 
+  mutate_at(c("total_mean","total_sd"), round, 2) 
+
+
+# Larvae
+data_post2010 %>% 
+  group_by(climate_region) %>% 
+  filter(month > 2 & month < 7) %>% 
+    mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  summarise(total_mean = mean(total_l, na.rm = TRUE),
+            total_sd = sd(total_l, na.rm = TRUE)) %>% 
+  mutate_at(c("total_mean","total_sd"), round, 2) 
+
+
+# Nymphs
+data_post2010 %>% 
+  group_by(climate_region) %>% 
+  filter(month > 2 & month < 7) %>% 
+    mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  summarise(total_mean = mean(total_n, na.rm = TRUE),
+            total_sd = sd(total_n, na.rm = TRUE)) %>% 
+  mutate_at(c("total_mean","total_sd"), round, 2) 
+
+```
+
+
+Peak abundance
+```{r}
+
+##larva
+data %>% 
+  filter(month > 2 & month < 7) %>% 
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(total_l = mean(total_l, na.rm = TRUE)) %>% 
+  arrange(desc(total_l)) %>% 
+  slice(1)
+
+##nymph
+data %>% 
+  filter(month > 2 & month < 7) %>% 
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(total_n = mean(total_n, na.rm = TRUE)) %>% 
+  arrange(desc(total_n)) %>% 
+  slice(1)
+```
+
+Duration of season
+min and max date (mean > 0)
+```{r}
+## larva
+data %>% 
+  filter(month > 2 & month < 7) %>% 
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(mean_l = mean(total_l, na.rm = TRUE)) %>% 
+  filter(mean_l > 0) %>% 
+  summarise(min_j = min(julian, na.rm = TRUE),
+            max_j = max(julian, na.rm = TRUE),
+            length = (max_j-min_j))
+
+
+## nymph
+## larva
+data %>% 
+  filter(month > 2 & month < 7) %>% 
+  mutate(climate_region = factor(climate_region,
+                                 levels = c("North Coast", 
+                                   "San Francisco Bay Area", "San Joaquin Valley",
+                                   "Central Coast", "Los Angeles"))) %>% 
+  group_by(climate_region, julian) %>% 
+  summarise(mean_n = mean(total_n, na.rm = TRUE)) %>% 
+  filter(mean_n > 0) %>% 
+  summarise(min_j = min(julian, na.rm = TRUE),
+            max_j = max(julian, na.rm = TRUE),
+            length = (max_j-min_j))
+
+
+```
+
+Overlap metrics
+
+part a. KDE
+```{r}
+tick_data_kde <- data %>% 
+    filter(month > 2 & month < 7) %>%
+    filter(climate_region == "San Francisco Bay Area") %>% # change this out for region
+  group_by(julian) %>% 
+  summarise(total_l = mean(total_l, na.rm = TRUE),
+            total_n = mean(total_n, na.rm = TRUE)) %>% 
+  dplyr::select(julian, total_l, total_n) %>% 
+  rename(Date = julian,
+         Larvae_Count = total_l,
+         Nymphs_Count = total_n) %>% 
+  na.omit()
+
+# Create density estimates
+larval_density <- density(tick_data_kde$Larvae_Count, from = 0, to = max(tick_data_kde$Larvae_Count))#, n = 512)
+nymphal_density <- density(tick_data_kde$Nymphs_Count, from = 0, to = max(tick_data_kde$Nymphs_Count))#, n = 512)
+
+# Calculate overlap area
+# After obtaining KDEs for both groups, you can analyze how much they overlap. This can be done using various metrics, such as the area under the curves (AUC) or more sophisticated methods that quantify the degree of overlap.
+overlap_area <- sum(pmin(larval_density$y, nymphal_density$y)) * (larval_density$x[2] - larval_density$x[1])
+overlap_area
+
+
+# San Francisco Bay Area 0.8881365
+# Central Coast 0.3201129
+# Los Angeles 0.2953363
+```
+
+part b. Jaccard index
+```{r}
+tick_data_ji <- data %>% 
+  filter(climate_region == "Los Angeles") %>% 
+  filter(month > 2 & month < 7) %>% 
+  group_by(climate_region, julian) %>%  
+  summarise(total_l = mean(total_l, na.rm = TRUE),
+            total_n = mean(total_n, na.rm = TRUE)) %>% 
+  dplyr::select(julian, total_l, total_n) %>% 
+  rename(Date = julian,
+         Larvae_Count = total_l,
+         Nymphs_Count = total_n) %>% 
+  na.omit()
+
+tick_long <- melt(tick_data_ji, id.vars = "Date", variable.name = "Tick_Type", value.name = "Count")
+
+overlap_count <- sum(pmin(tick_data_ji$Larvae_Count, tick_data_ji$Nymphs_Count))
+total_count <- sum(pmax(tick_data_ji$Larvae_Count, tick_data_ji$Nymphs_Count))
+
+# Jaccard index
+jaccard_index<- overlap_count / total_count
+jaccard_index
+
+# SF 0.4725434
+# Central Coast  0.3800453
+# Los Angeles 0.223288
+```
+
+##Additional File 5 -- GAMs
+
+###All ticks
+```{r}
+## run model
+mod_monthly_3cr <- gam(total_ticks ~ 
+             s(tmmx_monthly, by = climate_region, bs = "cr") +
+             s(sph_monthly, by = climate_region) +
+             s(pdsi_monthly, by = climate_region) +
+              s(lon, lat, bs = "gp") 
+             + climate_region, # fixed effect
+           data = data_3climateregions, 
+           method = "REML",
+           family = tw(link = "log"))
+
+## look at model summary
+summary(mod_monthly_3cr)
+
+
+## check model diagnostics
+gam.check(mod_monthly_3cr)
+
+## Plot model results for all ticks
+plot.gam(mod_monthly_3cr,
+         se = TRUE, # leave standard error
+         shade = TRUE, # shade ci
+         shade.col = "lightblue",
+         lwd = 2, # line thickness
+         ylab = "Juvenile Tick Burden", 
+         scale = 0,
+         pages = 2, # put on 2 pages
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr)[1]) # shift y intercept based on coeficients
+```
+
+###Larvae
+```{r}
+## run model
+mod_monthly_3cr_larvae <- gam(total_l ~ 
+             s(tmmx_monthly, by = climate_region, bs = "cr") +
+             s(sph_monthly, by = climate_region) +
+             s(pdsi_monthly, by = climate_region) +
+             climate_region, # fixed effect
+           data = data_3climateregions, 
+           method = "REML",
+           family = tw(link = "log"))
+
+## look at model summary
+summary(mod_monthly_3cr_larvae)
+
+
+## check model diagnostics
+gam.check(mod_monthly_3cr_larvae)
+
+## Plot model results for larval ticks
+plot.gam(mod_monthly_3cr_larvae,
+         se = TRUE, # leave standard error
+         shade = TRUE, # shade ci
+         shade.col = "lightblue",
+         lwd = 2, # line thickness
+         ylab = "Larval Tick Burden", 
+         scale = 0,
+         pages = 2, # put on 2 pages
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr_larvae)[1]) # shift y intercept based on coeficients
+mod_monthly_larvae <- recordPlot()
+
+#mod_larvae_pdsi <- plot_grid(mod_monthly_larvae, align = "hv")
+
+#ggsave(mod_monthly_larvae, file = "figures/post2010/mod_monthly_larvae.jpeg",
+#       height = 3)
+```
+
+###Nymphs
+```{r}
+## run model
+mod_monthly_3cr_nymphs <- gam(total_n ~ 
+             s(tmmx_monthly, by = climate_region, bs = "cr") +
+             s(sph_monthly, by = climate_region) +
+             s(pdsi_monthly, by = climate_region) +
+             climate_region, # fixed effect
+           data = data_3climateregions, 
+           method = "REML",
+           family = tw(link = "log"))
+
+## look at model summary
+summary(mod_monthly_3cr_nymphs)
+
+
+## check model diagnostics
+gam.check(mod_monthly_3cr_nymphs)
+
+## Plot model results for larval ticks
+plot.gam(mod_monthly_3cr_nymphs,
+         se = TRUE, # leave standard error
+         shade = TRUE, # shade ci
+         shade.col = "lightblue",
+         lwd = 2, # line thickness
+         ylab = "Nymphal Tick Burden", 
+         scale = 0,
+         pages = 2, # put on 2 pages
+         scheme = 2,
+         seWithMean = TRUE,
+         shift = coef(mod_monthly_3cr_nymphs)[1]) # shift y intercept based on coeficients
+mod_monthly_nymphs <- recordPlot()
+
+mod_nymphs <- plot_grid(mod_monthly_nymphs, align = "hv")
+
+
+#ggsave(mod_nymphs, file = "figures/post2010/mod_monthly_nymphs.jpeg",
+#       height = 3)
+```
